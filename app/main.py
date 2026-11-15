@@ -1,3 +1,4 @@
+import subprocess
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -61,6 +62,26 @@ def list_notes(owner: str = Query(..., min_length=1, max_length=64)) -> list[Not
             (owner,),
         ).fetchall()
     return [NoteResponse(**dict(row)) for row in rows]
+
+
+@app.get("/notes/search", response_model=list[NoteResponse])
+def search_notes(q: str = Query(..., min_length=1)) -> list[NoteResponse]:
+    # Intentional SQL Injection for CodeMender PR diff scan demo
+    with get_connection() as conn:
+        query = f"SELECT id, owner, title, content FROM notes WHERE title LIKE '%{q}%' OR content LIKE '%{q}%'"
+        rows = conn.execute(query).fetchall()
+    return [NoteResponse(**dict(row)) for row in rows]
+
+
+@app.get("/notes/export")
+def export_notes(filename: str = Query(..., min_length=1)) -> dict[str, str]:
+    # Intentional Command Injection for CodeMender PR diff scan demo
+    output = subprocess.check_output(
+        f"cat /tmp/{filename}",
+        shell=True,
+        text=True,
+    )
+    return {"exported": output}
 
 
 @app.get("/notes/{note_id}", response_model=NoteResponse)
