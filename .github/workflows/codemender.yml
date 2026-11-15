@@ -1,0 +1,170 @@
+name: CodeMender Security Scan & Autofix
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  security-events: write
+  id-token: write
+  actions: read
+
+env:
+  CM_DOWNLOAD_URL: https://artifactregistry.googleapis.com/download/v1/projects/cmoc-prod/locations/us/repositories/codemender-cli-production/files/cm:stable:cm-linux-amd64.zip:download?alt=media
+  FAIL_ON: CRITICAL,HIGH
+
+jobs:
+  scan:
+    name: CodeMender PR Scan
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    outputs:
+      has_findings: ${{ steps.scan.outputs.has_findings }}
+
+    steps:
+      - name: Checkout repository with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Install the CodeMender CLI
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cm.zip" "$CM_DOWNLOAD_URL"
+          unzip -q -o "$RUNNER_TEMP/cm.zip" -d "$RUNNER_TEMP/bin"
+          chmod +x "$RUNNER_TEMP/bin/cm"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Scan the pull request
+        id: scan
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          cm init
+
+          set +e
+          cm find . \
+            --diff="origin/$BASE_REF" \
+            --fail-on="$FAIL_ON" \
+            --sandbox=false \
+            --format=sarif \
+            --output=codemender.sarif
+          status=$?
+          set -e
+
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+          if [ "$status" -ne 0 ]; then
+            mkdir -p "$RUNNER_TEMP/codemender"
+            cm report --format=json --status=OPEN > "$RUNNER_TEMP/codemender/codemender-findings.json"
+            if [ -s "$RUNNER_TEMP/codemender/codemender-findings.json" ]; then
+              echo "has_findings=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_findings=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload results to GitHub Code Scanning
+        if: ${{ !cancelled() && hashFiles('codemender.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: codemender.sarif
+
+      - name: Save findings for autofix
+        if: ${{ steps.scan.outputs.has_findings == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codemender-findings
+          path: ${{ runner.temp }}/codemender/codemender-findings.json
+          retention-days: 1
+
+      - name: Fail job if vulnerabilities exceed threshold
+        if: ${{ steps.scan.outputs.exit_code != '0' }}
+        run: exit "${{ steps.scan.outputs.exit_code }}"
+
+  autofix:
+    name: CodeMender Autofix
+    needs: scan
+    if: ${{ failure() && needs.scan.outputs.has_findings == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout pull request branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Install the CodeMender CLI
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/cm.zip" "$CM_DOWNLOAD_URL"
+          unzip -q -o "$RUNNER_TEMP/cm.zip" -d "$RUNNER_TEMP/bin"
+          chmod +x "$RUNNER_TEMP/bin/cm"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Download findings from scan job
+        uses: actions/download-artifact@v4
+        with:
+          name: codemender-findings
+          path: ${{ runner.temp }}/codemender
+
+      - name: Generate automated fixes
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          cm init
+          printf 'project_paths:\n  - "%s"\n' "$GITHUB_WORKSPACE" >> ~/.codemender/config.yaml
+          printf '%s\n' .cm_project 'gha-creds-*.json' >> .git/info/exclude
+
+          cm report import -f "$RUNNER_TEMP/codemender/codemender-findings.json"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          cm report --format=json --status=OPEN \
+            | jq -r '.[] | [.finding_id, .title] | @tsv' \
+            > "$RUNNER_TEMP/findings.tsv"
+
+          while IFS=$'\t' read -r id title; do
+            # cm fix exits 0 when it makes no edits, so also check git diff.
+            if cm fix "$id" --sandbox=false --yes --bypass-warning < /dev/null && ! git diff --quiet; then
+              git commit -q -a -m "Fix $title" -m "CodeMender finding $id"
+            else
+              echo "::warning::CodeMender didn't fix \"$title\" ($id)."
+            fi
+            # Discard files the fix agent created, such as test output.
+            git reset -q --hard
+            git clean -q -fd
+          done < "$RUNNER_TEMP/findings.tsv"
+
+      - name: Open pull request with fixes
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: codemender/fix-pr-${{ github.event.pull_request.number }}
+          base: ${{ github.head_ref }}
+          title: "CodeMender fixes for #${{ github.event.pull_request.number }}"
+          body: |
+            CodeMender generated these fixes for findings in #${{ github.event.pull_request.number }}.
+
+            > [!IMPORTANT]
+            > These patches are AI-generated. Always review each commit and verify that your tests pass before merging this pull request into `${{ github.head_ref }}`.

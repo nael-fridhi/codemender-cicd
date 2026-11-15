@@ -1,0 +1,1 @@
+"""CloudVault sample application package."""

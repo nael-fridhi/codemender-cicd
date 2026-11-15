@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+*.db
+*.sqlite3
+.cm_project/
+.codemender/
+codemender.sarif
+codemender-findings.json
+.env
