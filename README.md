@@ -181,17 +181,17 @@ To allow the `autofix` job to open pull requests with fixes:
 
 ---
 
-## Live Demo Runbook (For Your Audience)
+## Demo Walkthrough
 
-This repository includes a pre-built **`demo/vulnerable-pr`** branch (or you can make the edit live on stage) to demonstrate the full CodeMender loop in ~3 minutes:
+This repository includes a **`demo/vulnerable-pr`** branch to demonstrate the end-to-end CodeMender workflow:
 
-1. **Show the Clean Baseline (`main`)**:
-   - Point out `app/main.py` (parameterized SQLite queries) and green `CI Tests`.
+1. **Clean Baseline (`main`)**:
+   - `app/main.py` uses parameterized SQLite queries and passes all checks in `CI Tests`.
 2. **Open a Vulnerable Pull Request**:
-   - Create a PR from **`demo/vulnerable-pr`** into **`main`** (this branch adds a `/notes/search` endpoint with **SQL Injection** and a `/notes/export` endpoint with **Command Injection**).
-3. **Watch CodeMender Catch & Block**:
+   - Open a PR from **`demo/vulnerable-pr`** into **`main`** (this branch adds a `/notes/search` endpoint with **SQL Injection** and a `/notes/export` endpoint with **Command Injection**).
+3. **CodeMender Detects & Blocks**:
    - `CodeMender PR Scan` runs `cm find --diff="origin/main"`, detects the `CRITICAL`/`HIGH` vulnerabilities in the PR diff, uploads `codemender.sarif` to **Security > Code scanning**, and fails the PR check.
-4. **Watch CodeMender Auto-Fix**:
-   - `CodeMender Autofix` spins up, runs `cm fix` on each finding, commits the patches, and opens **`CodeMender fixes for #<PR>`** (`codemender/fix-pr-<PR>` -> `demo/vulnerable-pr`).
+4. **CodeMender Opens an Autofix PR**:
+   - `CodeMender Autofix` runs `cm fix` on each finding, commits the patches, and opens **`CodeMender fixes for #<PR>`** (`codemender/fix-pr-<PR>` -> `demo/vulnerable-pr`).
 5. **Review, Test & Merge**:
-   - Walk the audience through the AI-generated diff in the fix PR, approve the `CI Tests` workflow on the fix PR, merge the fix PR into `demo/vulnerable-pr`, and watch the original PR re-scan and turn **green**.
+   - Review the AI-generated diff in the fix PR, approve the `CI Tests` workflow on the fix PR, merge the fix PR into `demo/vulnerable-pr`, and watch the original PR re-scan and pass.
