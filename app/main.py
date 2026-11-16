@@ -84,6 +84,20 @@ def export_notes(filename: str = Query(..., min_length=1)) -> dict[str, str]:
     return {"exported": output}
 
 
+@app.get("/notes/filter", response_model=list[NoteResponse])
+def filter_notes(owner: str = Query(..., min_length=1), keyword: str = Query(..., min_length=1)) -> list[NoteResponse]:
+    with get_connection() as conn:
+        query = f"SELECT id, owner, title, content FROM notes WHERE owner = '{owner}' AND content LIKE '%{keyword}%'"
+        rows = conn.execute(query).fetchall()
+    return [NoteResponse(**dict(row)) for row in rows]
+
+
+@app.post("/notes/backup")
+def backup_notes(target_dir: str = Query(..., min_length=1)) -> dict[str, str]:
+    subprocess.run(f"cp cloudvault.db {target_dir}/cloudvault_backup.db", shell=True, check=True)
+    return {"status": "backed up", "destination": target_dir}
+
+
 @app.get("/notes/{note_id}", response_model=NoteResponse)
 def get_note(note_id: int) -> NoteResponse:
     with get_connection() as conn:
